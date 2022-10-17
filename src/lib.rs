@@ -93,6 +93,8 @@
 //! | 1-2 matches       | -              | 28.840 µs         | 83.035 µs       |
 //!
 
+#![feature(ptr_metadata)]
+
 use std::cell::UnsafeCell;
 
 use bevy::{
@@ -115,9 +117,8 @@ pub trait TraitQuery: 'static {}
 
 pub trait TraitQueryMarker<Trait: ?Sized + TraitQuery> {
     type Covered: Component;
-    /// Casts an untyped pointer to a trait object pointer,
-    /// with a vtable corresponding to `Self::Covered`.
-    fn cast(_: *mut u8) -> *mut Trait;
+    /// A null trait object pointer, with a vtable corresponding to `Self::Covered`.
+    fn null_ptr() -> *mut Trait;
 }
 
 pub trait RegisterExt {
@@ -137,7 +138,9 @@ impl RegisterExt for World {
             .into_inner();
         let meta = TraitImplMeta {
             size_bytes: std::mem::size_of::<C>(),
-            dyn_ctor: DynCtor { cast: <(C,)>::cast },
+            dyn_ctor: DynCtor {
+                null_ptr: <(C,)>::null_ptr(),
+            },
         };
         registry.register::<C>(component_id, meta);
         self
@@ -239,8 +242,8 @@ macro_rules! impl_trait_query {
 
         impl<T: $trait + $crate::imports::Component> $crate::TraitQueryMarker<dyn $trait> for (T,) {
             type Covered = T;
-            fn cast(ptr: *mut u8) -> *mut dyn $trait {
-                ptr as *mut T as *mut _
+            fn null_ptr() -> *mut dyn $trait {
+                std::ptr::null_mut::<T>() as *mut _
             }
         }
 
@@ -313,8 +316,11 @@ impl<Trait: ?Sized + TraitQuery> FetchState for DynQueryState<Trait> {
 /// Turns an untyped pointer into a trait object pointer,
 /// for a specific erased concrete type.
 struct DynCtor<Trait: ?Sized> {
-    cast: unsafe fn(*mut u8) -> *mut Trait,
+    null_ptr: *mut Trait,
 }
+
+unsafe impl<T: ?Sized> Send for DynCtor<T> {}
+unsafe impl<T: ?Sized> Sync for DynCtor<T> {}
 
 impl<T: ?Sized> Copy for DynCtor<T> {}
 impl<T: ?Sized> Clone for DynCtor<T> {
@@ -325,10 +331,12 @@ impl<T: ?Sized> Clone for DynCtor<T> {
 
 impl<Trait: ?Sized> DynCtor<Trait> {
     unsafe fn cast(self, ptr: Ptr) -> &Trait {
-        &*(self.cast)(ptr.as_ptr())
+        let meta = std::ptr::metadata(self.null_ptr);
+        &*std::ptr::from_raw_parts(ptr.as_ptr() as *mut _, meta)
     }
     unsafe fn cast_mut(self, ptr: PtrMut) -> &mut Trait {
-        &mut *(self.cast)(ptr.as_ptr())
+        let meta = std::ptr::metadata(self.null_ptr);
+        &mut *std::ptr::from_raw_parts_mut(ptr.as_ptr() as *mut _, meta)
     }
 }
 
